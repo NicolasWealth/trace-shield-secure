@@ -18,7 +18,7 @@ const config = {
 export const firebaseConfig = config;
 
 export function isFirebaseConfigured(): boolean {
-  return Boolean(config.apiKey && config.projectId && config.appId);
+  return Boolean(config["apiKey"] && config["projectId"] && config["appId"]);
 }
 
 let appPromise: Promise<FirebaseApp> | null = null;

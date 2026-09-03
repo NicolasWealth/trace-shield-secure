@@ -59,7 +59,7 @@ export function resolvePriority(exposureRisk: number, evidenceConfidence: number
 
 export interface AnalysisInput {
   incident: Incident;
-  batch?: Batch;
+  batch: Batch | undefined;
   events: CustodyEvent[];
   organizations: Organization[];
 }

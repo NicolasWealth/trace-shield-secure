@@ -12,7 +12,10 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as BatchesRouteImport } from './routes/batches'
 import { Route as DashboardRouteImport } from './routes/dashboard'
+import { Route as IncidentsRouteImport } from './routes/incidents'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as BatchesIndexRouteImport } from './routes/batches.index'
+import { Route as BatchesBatchIdRouteImport } from './routes/batches.$batchId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -29,43 +32,88 @@ const DashboardRoute = DashboardRouteImport.update({
   path: '/dashboard',
   getParentRoute: () => rootRouteImport,
 } as any)
+const IncidentsRoute = IncidentsRouteImport.update({
+  id: '/incidents',
+  path: '/incidents',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
+const BatchesIndexRoute = BatchesIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => BatchesRoute,
+} as any)
+const BatchesBatchIdRoute = BatchesBatchIdRouteImport.update({
+  id: '/$batchId',
+  path: '/$batchId',
+  getParentRoute: () => BatchesRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/batches': typeof BatchesRoute
+  '/batches': typeof BatchesRouteWithChildren
   '/dashboard': typeof DashboardRoute
+  '/incidents': typeof IncidentsRoute
   '/login': typeof LoginRoute
+  '/batches/$batchId': typeof BatchesBatchIdRoute
+  '/batches/': typeof BatchesIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/batches': typeof BatchesRoute
   '/dashboard': typeof DashboardRoute
+  '/incidents': typeof IncidentsRoute
   '/login': typeof LoginRoute
+  '/batches/$batchId': typeof BatchesBatchIdRoute
+  '/batches': typeof BatchesIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/batches': typeof BatchesRoute
+  '/batches': typeof BatchesRouteWithChildren
   '/dashboard': typeof DashboardRoute
+  '/incidents': typeof IncidentsRoute
   '/login': typeof LoginRoute
+  '/batches/$batchId': typeof BatchesBatchIdRoute
+  '/batches/': typeof BatchesIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/batches' | '/dashboard' | '/login'
+  fullPaths:
+    | '/'
+    | '/batches'
+    | '/dashboard'
+    | '/incidents'
+    | '/login'
+    | '/batches/$batchId'
+    | '/batches/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/batches' | '/dashboard' | '/login'
-  id: '__root__' | '/' | '/batches' | '/dashboard' | '/login'
+  to:
+    | '/'
+    | '/dashboard'
+    | '/incidents'
+    | '/login'
+    | '/batches/$batchId'
+    | '/batches'
+  id:
+    | '__root__'
+    | '/'
+    | '/batches'
+    | '/dashboard'
+    | '/incidents'
+    | '/login'
+    | '/batches/$batchId'
+    | '/batches/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  BatchesRoute: typeof BatchesRoute
+  BatchesRoute: typeof BatchesRouteWithChildren
   DashboardRoute: typeof DashboardRoute
+  IncidentsRoute: typeof IncidentsRoute
   LoginRoute: typeof LoginRoute
 }
 
@@ -92,6 +140,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DashboardRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/incidents': {
+      id: '/incidents'
+      path: '/incidents'
+      fullPath: '/incidents'
+      preLoaderRoute: typeof IncidentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/login': {
       id: '/login'
       path: '/login'
@@ -99,13 +154,41 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/batches/': {
+      id: '/batches/'
+      path: '/'
+      fullPath: '/batches/'
+      preLoaderRoute: typeof BatchesIndexRouteImport
+      parentRoute: typeof BatchesRoute
+    }
+    '/batches/$batchId': {
+      id: '/batches/$batchId'
+      path: '/$batchId'
+      fullPath: '/batches/$batchId'
+      preLoaderRoute: typeof BatchesBatchIdRouteImport
+      parentRoute: typeof BatchesRoute
+    }
   }
 }
 
+interface BatchesRouteChildren {
+  BatchesBatchIdRoute: typeof BatchesBatchIdRoute
+  BatchesIndexRoute: typeof BatchesIndexRoute
+}
+
+const BatchesRouteChildren: BatchesRouteChildren = {
+  BatchesBatchIdRoute: BatchesBatchIdRoute,
+  BatchesIndexRoute: BatchesIndexRoute,
+}
+
+const BatchesRouteWithChildren =
+  BatchesRoute._addFileChildren(BatchesRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  BatchesRoute: BatchesRoute,
+  BatchesRoute: BatchesRouteWithChildren,
   DashboardRoute: DashboardRoute,
+  IncidentsRoute: IncidentsRoute,
   LoginRoute: LoginRoute,
 }
 export const routeTree = rootRouteImport

@@ -27,7 +27,9 @@ interface Search {
 
 export const Route = createFileRoute("/supply-chain")({
   validateSearch: (search: Record<string, unknown>): Search =>
-    typeof search.batch === "string" && search.batch ? { batch: search.batch } : {},
+    typeof search["batch"] === "string" && search["batch"]
+      ? { batch: search["batch"] as string }
+      : {},
   head: () => ({
     meta: [
       { title: "Supply Chain Map — TraceShield" },

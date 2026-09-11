@@ -89,7 +89,7 @@ function IncidentDetailPage() {
         <MetricCard
           label="Units affected"
           value={formatNumber(analysis.affectedQuantity)}
-          hint="downstream of incident point"
+          hint={`${formatNumber(analysis.accountedQuantity)} units accounted`}
         />
         <MetricCard
           label="Locations"
@@ -120,6 +120,37 @@ function IncidentDetailPage() {
               </div>
             </div>
           </div>
+
+          {analysis.riskFactors && analysis.evidenceFactors ? (
+            <div className="rounded-lg border border-border bg-card p-4">
+              <h2 className="font-display text-sm font-semibold text-foreground">
+                Factor Breakdown (0–100)
+              </h2>
+              <div className="mt-3 grid gap-4 sm:grid-cols-2 text-xs">
+                <div>
+                  <p className="font-mono text-[10px] uppercase text-muted-foreground mb-2">Exposure Factors</p>
+                  <ul className="space-y-1 text-mist-300">
+                    <li className="flex justify-between"><span>Quantity Ratio (30%)</span><span className="font-mono">{analysis.riskFactors.affectedQuantityRatio}</span></li>
+                    <li className="flex justify-between"><span>Downstream Reach (25%)</span><span className="font-mono">{analysis.riskFactors.downstreamReach}</span></li>
+                    <li className="flex justify-between"><span>Consumer Reach (20%)</span><span className="font-mono">{analysis.riskFactors.consumerFacingReach}</span></li>
+                    <li className="flex justify-between"><span>Geographic Reach (10%)</span><span className="font-mono">{analysis.riskFactors.geographicReach}</span></li>
+                    <li className="flex justify-between"><span>Severity Score (15%)</span><span className="font-mono">{analysis.riskFactors.incidentSeverity}</span></li>
+                  </ul>
+                </div>
+                <div>
+                  <p className="font-mono text-[10px] uppercase text-muted-foreground mb-2">Evidence Factors</p>
+                  <ul className="space-y-1 text-mist-300">
+                    <li className="flex justify-between"><span>Event Completeness (25%)</span><span className="font-mono">{analysis.evidenceFactors.eventCompleteness}</span></li>
+                    <li className="flex justify-between"><span>Chain Integrity (25%)</span><span className="font-mono">{analysis.evidenceFactors.chainIntegrity}</span></li>
+                    <li className="flex justify-between"><span>Inventory Accounting (20%)</span><span className="font-mono">{analysis.evidenceFactors.inventoryAccounting}</span></li>
+                    <li className="flex justify-between"><span>Temporal Consistency (10%)</span><span className="font-mono">{analysis.evidenceFactors.temporalConsistency}</span></li>
+                    <li className="flex justify-between"><span>Org Completeness (10%)</span><span className="font-mono">{analysis.evidenceFactors.organizationCompleteness}</span></li>
+                    <li className="flex justify-between"><span>Anomaly Quality (10%)</span><span className="font-mono">{analysis.evidenceFactors.anomalyQuality}</span></li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           <div className="rounded-lg border border-border bg-card p-4">
             <h2 className="font-display text-sm font-semibold text-foreground">
@@ -153,6 +184,22 @@ function IncidentDetailPage() {
             <p className="mt-2 text-sm text-mist-300">{incident.description}</p>
           </div>
 
+          {analysis.evidenceGaps.length > 0 ? (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
+              <h2 className="font-display text-sm font-semibold text-amber-400">
+                Evidence Gaps & Anomalies
+              </h2>
+              <ul className="mt-2 space-y-1.5 text-xs text-amber-200/80">
+                {analysis.evidenceGaps.map((gap, i) => (
+                  <li key={i} className="flex gap-1.5">
+                    <span>•</span>
+                    <span>{gap}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
           <div className="rounded-lg border border-border bg-card p-4">
             <h2 className="font-display text-sm font-semibold text-foreground">
               Affected locations
@@ -174,7 +221,7 @@ function IncidentDetailPage() {
             </ul>
             <Link
               to="/supply-chain"
-              search={{ batch: incident.batchId }}
+              search={{ batch: incident.batchId, incident: incident.incidentId }}
               className="mt-3 inline-block text-xs text-primary hover:underline"
             >
               View on the supply-chain map

@@ -96,16 +96,38 @@ export interface AffectedLocation {
   quantity: number;
 }
 
+export interface RiskFactors {
+  affectedQuantityRatio: number;
+  downstreamReach: number;
+  consumerFacingReach: number;
+  geographicReach: number;
+  incidentSeverity: number;
+}
+
+export interface EvidenceFactors {
+  eventCompleteness: number;
+  chainIntegrity: number;
+  inventoryAccounting: number;
+  temporalConsistency: number;
+  organizationCompleteness: number;
+  anomalyQuality: number;
+}
+
 export interface Analysis {
   analysisId: string;
   incidentId: string;
   batchId: string;
   affectedLocations: AffectedLocation[];
   affectedQuantity: number;
+  accountedQuantity: number;
+  unaccountedQuantity: number;
   exposureRisk: number;
   evidenceConfidence: number;
+  riskFactors?: RiskFactors;
+  evidenceFactors?: EvidenceFactors;
   priority: Priority;
   reasons: string[];
+  evidenceGaps: string[];
   recommendedAction: string;
   generatedAt: string;
 }

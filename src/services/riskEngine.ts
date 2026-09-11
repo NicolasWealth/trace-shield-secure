@@ -1,7 +1,8 @@
 /**
  * Deterministic, transparent recall-scoring engine.
  * No AI, no external calls — every point is explainable and reproducible.
- * Isolated here so it can be replaced or extended later.
+ * Core differentiator: downstream exposure is calculated from supply-chain inventory flow
+ * without double-counting units as they move through custody events.
  */
 import type {
   AffectedLocation,
@@ -49,12 +50,255 @@ const RECOMMENDED_ACTION: Record<Priority, string> = {
     "Collect further laboratory and custody evidence; there is not enough signal to justify market action yet.",
 };
 
-/** The four documented priority rules. */
+export const EXPOSURE_HIGH_THRESHOLD = 80;
+export const CONFIDENCE_HIGH_THRESHOLD = 80;
+
+const SEVERITY_SCORES: Record<Incident["type"], number> = {
+  CONTAMINATION: 100,
+  COLD_CHAIN_BREAK: 75,
+  FOREIGN_BODY: 60,
+  LABELLING: 30,
+  OTHER: 25,
+};
+
+export interface InventoryPosition {
+  organizationId: string;
+  organizationName: string;
+  location: string;
+  quantity: number;
+  isManufacturer: boolean;
+}
+
+export interface InventoryFlowResult {
+  affectedLocations: AffectedLocation[];
+  affectedQuantity: number;
+  accountedQuantity: number;
+  unaccountedQuantity: number;
+  evidenceGaps: string[];
+  chainComplete: boolean;
+  duplicateEventsCount: number;
+  brokenLinksCount: number;
+  inventoryPositions: InventoryPosition[];
+}
+
+/** The four documented priority rules using centralized thresholds. */
 export function resolvePriority(exposureRisk: number, evidenceConfidence: number): Priority {
-  if (exposureRisk >= 80 && evidenceConfidence >= 80) return "IMMEDIATE_RECALL";
-  if (exposureRisk >= 80) return "URGENT_INVESTIGATION";
-  if (evidenceConfidence >= 80) return "MONITOR";
+  if (exposureRisk >= EXPOSURE_HIGH_THRESHOLD && evidenceConfidence >= CONFIDENCE_HIGH_THRESHOLD) {
+    return "IMMEDIATE_RECALL";
+  }
+  if (exposureRisk >= EXPOSURE_HIGH_THRESHOLD) return "URGENT_INVESTIGATION";
+  if (evidenceConfidence >= CONFIDENCE_HIGH_THRESHOLD) return "MONITOR";
   return "VERIFY_EVIDENCE";
+}
+
+/**
+ * Calculates deterministic inventory flow across custody events.
+ * Bounds exposure by batch quantity and tracks current inventory positions.
+ */
+export function calculateInventoryFlow(
+  batch: Batch | undefined,
+  events: CustodyEvent[],
+  organizations: Organization[],
+): InventoryFlowResult {
+  const orgName = (id: string) =>
+    organizations.find((o) => o.organizationId === id)?.name ?? id;
+  const getOrg = (id: string) =>
+    organizations.find((o) => o.organizationId === id);
+
+  const batchId = batch?.batchId ?? events[0]?.batchId ?? "UNKNOWN";
+  const batchEvents = events.filter((e) => e.batchId === batchId);
+
+  // Deduplicate identical events
+  const uniqueEvents: CustodyEvent[] = [];
+  const seenEventKeys = new Set<string>();
+  let duplicateEventsCount = 0;
+
+  for (const e of batchEvents) {
+    const key = `${e.eventId}|${e.type}|${e.fromOrganization}|${e.toOrganization}|${e.quantity}|${e.timestamp}|${e.location}`;
+    const dedupeKey = `${e.type}|${e.fromOrganization}|${e.toOrganization}|${e.quantity}|${e.timestamp}|${e.location}`;
+    if (seenEventKeys.has(key) || seenEventKeys.has(dedupeKey)) {
+      duplicateEventsCount++;
+    } else {
+      seenEventKeys.add(key);
+      seenEventKeys.add(dedupeKey);
+      uniqueEvents.push(e);
+    }
+  }
+
+  // Sort events chronologically
+  uniqueEvents.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+  // Determine starting batch quantity
+  const totalBatchQty =
+    batch?.quantity ??
+    Math.max(...uniqueEvents.map((e) => e.quantity), 0);
+
+  const evidenceGaps: string[] = [];
+  let brokenLinksCount = 0;
+
+  if (duplicateEventsCount > 0) {
+    evidenceGaps.push(`${duplicateEventsCount} duplicate custody event(s) detected and ignored.`);
+  }
+
+  // Check previousEventId integrity
+  const eventIdMap = new Map<string, CustodyEvent>(uniqueEvents.map((e) => [e.eventId, e]));
+  let chainComplete = uniqueEvents.length > 0;
+
+  for (let i = 0; i < uniqueEvents.length; i++) {
+    const e = uniqueEvents[i];
+    if (!e) continue;
+    if (e.previousEventId !== null && e.previousEventId !== undefined) {
+      const parent = eventIdMap.get(e.previousEventId);
+      if (!parent) {
+        brokenLinksCount++;
+        chainComplete = false;
+        evidenceGaps.push(
+          `Broken custody link: Event ${e.eventId} references missing previous event ${e.previousEventId}.`,
+        );
+      }
+    } else if (i > 0 && e.type !== "PRODUCED") {
+      chainComplete = false;
+    }
+  }
+
+  // Inventory balance per organization & location
+  interface NodeBalance {
+    organizationId: string;
+    organizationName: string;
+    location: string;
+    quantity: number;
+    isManufacturer: boolean;
+  }
+  const balances = new Map<string, NodeBalance>();
+
+  const addBalance = (orgId: string, location: string, qty: number) => {
+    const key = `${orgId}|${location}`;
+    const org = getOrg(orgId);
+    const existing = balances.get(key);
+    const isMfr = org?.type === "MANUFACTURER";
+    if (existing) {
+      existing.quantity += qty;
+    } else {
+      balances.set(key, {
+        organizationId: orgId,
+        organizationName: orgName(orgId),
+        location,
+        quantity: Math.max(0, qty),
+        isManufacturer: isMfr,
+      });
+    }
+  };
+
+  const deductBalance = (orgId: string, qty: number): number => {
+    let remainingToDeduct = qty;
+    for (const b of balances.values()) {
+      if (b.organizationId === orgId && b.quantity > 0) {
+        const deduct = Math.min(b.quantity, remainingToDeduct);
+        b.quantity -= deduct;
+        remainingToDeduct -= deduct;
+        if (remainingToDeduct <= 0) break;
+      }
+    }
+    return qty - remainingToDeduct;
+  };
+
+  // Seed origin manufacturer balance
+  const originOrgId =
+    batch?.organizationId ??
+    uniqueEvents.find((e) => e.type === "PRODUCED")?.fromOrganization ??
+    uniqueEvents[0]?.fromOrganization;
+
+  if (originOrgId) {
+    const originOrg = getOrg(originOrgId);
+    const originLocation = originOrg?.location ?? uniqueEvents[0]?.location ?? "Origin";
+    addBalance(originOrgId, originLocation, totalBatchQty);
+  }
+
+  let totalSoldQuantity = 0;
+
+  // Process unique events chronologically
+  for (let i = 0; i < uniqueEvents.length; i++) {
+    const e = uniqueEvents[i];
+    if (!e) continue;
+    const fromOrg = e.fromOrganization;
+    const toOrg = e.toOrganization;
+    const qty = e.quantity;
+
+    if (e.type === "PRODUCED") {
+      continue;
+    } else if (e.type === "SHIPPED" || e.type === "STORED") {
+      if (fromOrg !== toOrg) {
+        deductBalance(fromOrg, qty);
+        addBalance(toOrg, e.location, qty);
+      } else {
+        addBalance(toOrg, e.location, 0);
+      }
+    } else if (e.type === "RECEIVED") {
+      // Check if this RECEIVED event confirms a prior SHIPPED event for the same movement leg
+      const prevEvent = i > 0 ? uniqueEvents[i - 1] : null;
+      const isReceiptConfirmation =
+        prevEvent &&
+        prevEvent.type === "SHIPPED" &&
+        prevEvent.fromOrganization === fromOrg &&
+        prevEvent.toOrganization === toOrg &&
+        prevEvent.quantity === qty;
+
+      if (!isReceiptConfirmation && fromOrg !== toOrg) {
+        deductBalance(fromOrg, qty);
+        addBalance(toOrg, e.location, qty);
+      }
+    } else if (e.type === "SOLD") {
+      deductBalance(fromOrg, qty);
+      totalSoldQuantity += qty;
+    }
+  }
+
+  // Gather downstream balances (non-manufacturer nodes with positive quantity)
+  const downstreamList: AffectedLocation[] = [];
+  let downstreamQuantitySum = 0;
+  let totalNetworkQuantity = 0;
+
+  for (const b of balances.values()) {
+    if (b.quantity > 0) {
+      totalNetworkQuantity += b.quantity;
+      if (!b.isManufacturer) {
+        downstreamQuantitySum += b.quantity;
+        downstreamList.push({
+          location: b.location,
+          organization: b.organizationName,
+          quantity: b.quantity,
+        });
+      }
+    }
+  }
+
+  const rawAffected = downstreamQuantitySum + totalSoldQuantity;
+  const affectedQuantity = Math.min(totalBatchQty, rawAffected);
+  const accountedQuantity = Math.min(totalBatchQty, totalNetworkQuantity + totalSoldQuantity);
+  const unaccountedQuantity = Math.max(0, totalBatchQty - accountedQuantity);
+
+  if (unaccountedQuantity > 0 && uniqueEvents.length > 0) {
+    evidenceGaps.push(
+      `${unaccountedQuantity.toLocaleString()} units of batch ${batchId} are unaccounted for in custody events.`,
+    );
+  }
+
+  downstreamList.sort((a, b) => b.quantity - a.quantity);
+  const inventoryPositions = [...balances.values()]
+    .map((b) => ({ ...b }))
+    .sort((a, b) => a.organizationName.localeCompare(b.organizationName));
+
+  return {
+    affectedLocations: downstreamList,
+    affectedQuantity,
+    accountedQuantity,
+    unaccountedQuantity,
+    evidenceGaps,
+    chainComplete,
+    duplicateEventsCount,
+    brokenLinksCount,
+    inventoryPositions,
+  };
 }
 
 export interface AnalysisInput {
@@ -70,123 +314,149 @@ export function analyseIncident({
   events,
   organizations,
 }: AnalysisInput): Analysis {
-  const orgName = (id: string) =>
-    organizations.find((o) => o.organizationId === id)?.name ?? id;
-
   const batchEvents = events
     .filter((e) => e.batchId === incident.batchId)
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
-  // --- Affected downstream locations -------------------------------------
-  const downstream = new Map<string, AffectedLocation>();
-  for (const e of batchEvents) {
-    const org = organizations.find((o) => o.organizationId === e.toOrganization);
-    if (!org || org.type === "MANUFACTURER") continue;
-    const key = `${org.organizationId}|${e.location}`;
-    const existing = downstream.get(key);
-    if (existing) existing.quantity += e.quantity;
-    else
-      downstream.set(key, {
-        location: e.location,
-        organization: orgName(e.toOrganization),
-        quantity: e.quantity,
-      });
-  }
-  const affectedLocations = [...downstream.values()].sort((a, b) => b.quantity - a.quantity);
-  const affectedQuantity = affectedLocations.reduce((s, l) => s + l.quantity, 0);
+  const flow = calculateInventoryFlow(batch, events, organizations);
+  const { affectedLocations, affectedQuantity, accountedQuantity, unaccountedQuantity, evidenceGaps } = flow;
 
-  const retailReach = affectedLocations.filter((l) =>
+  const totalBatchQty = batch?.quantity ?? Math.max(affectedQuantity, 1);
+  const affectedRatio = Math.min(1, affectedQuantity / totalBatchQty);
+
+  const retailLocations = affectedLocations.filter((l) =>
     organizations.some(
       (o) => o.name === l.organization && o.type === "RETAILER",
     ),
-  ).length;
-
-  const reasons: string[] = [];
-
-  // --- Exposure risk ------------------------------------------------------
-  let exposure = TYPE_SEVERITY[incident.type];
-  reasons.push(
-    `Incident type ${incident.type.replace(/_/g, " ").toLowerCase()} contributes ${TYPE_SEVERITY[incident.type]} exposure points.`,
   );
+  const retailReachCount = retailLocations.length;
 
-  const spreadPoints = Math.min(25, affectedLocations.length * 6);
-  exposure += spreadPoints;
-  reasons.push(
-    `${affectedLocations.length} affected location(s) in the custody chain add ${spreadPoints} points.`,
-  );
+  const uniqueGeographicLocations = new Set(affectedLocations.map((l) => l.location));
 
-  const retailPoints = Math.min(18, retailReach * 9);
-  exposure += retailPoints;
-  reasons.push(
-    retailReach > 0
-      ? `${retailReach} retail endpoint(s) reached by consumers add ${retailPoints} points.`
-      : "No retail endpoint reached yet, so no consumer-reach points were added.",
-  );
+  // =========================================================================
+  // 1. EXPOSURE RISK (30% Qty + 25% Downstream + 20% Consumer + 10% Geo + 15% Severity)
+  // =========================================================================
+  const affectedQuantityRatioFactor = clamp(affectedRatio * 100);
+  const downstreamReachFactor = clamp(Math.min(100, affectedLocations.length * 25));
+  const consumerFacingReachFactor = clamp(Math.min(100, retailReachCount * 50));
+  const geographicReachFactor = clamp(Math.min(100, uniqueGeographicLocations.size * 35));
+  const incidentSeverityFactor = SEVERITY_SCORES[incident.type] ?? 25;
 
-  const volumePoints = affectedQuantity >= 4000 ? 15 : affectedQuantity >= 1500 ? 10 : 4;
-  exposure += volumePoints;
-  reasons.push(
-    `${affectedQuantity.toLocaleString()} affected units add ${volumePoints} volume points.`,
-  );
+  const rawExposureRisk =
+    affectedQuantityRatioFactor * 0.30 +
+    downstreamReachFactor * 0.25 +
+    consumerFacingReachFactor * 0.20 +
+    geographicReachFactor * 0.10 +
+    incidentSeverityFactor * 0.15;
 
-  if (batch) {
-    const expiry = new Date(batch.expiryDate).getTime();
-    const shelfLifeLeft = expiry - Date.now();
-    if (shelfLifeLeft > 0) {
-      exposure += 8;
-      reasons.push("Product is still within shelf life, so it may still be consumed (+8).");
-    } else {
-      reasons.push("Product is past its expiry date, reducing further consumer exposure (+0).");
+  const exposureRisk = clamp(rawExposureRisk);
+
+  // =========================================================================
+  // 2. EVIDENCE CONFIDENCE (25% Comp + 25% Chain + 20% Inventory + 10% Temp + 10% Org + 10% Anomaly)
+  // =========================================================================
+
+  // Event completeness (0-100): does the chain contain production + custody events?
+  let eventCompletenessScore = 40;
+  const hasProduced = batchEvents.some((e) => e.type === "PRODUCED");
+  const hasDownstreamEvents = batchEvents.some((e) => e.type !== "PRODUCED");
+  if (hasProduced) eventCompletenessScore += 30;
+  if (hasDownstreamEvents) eventCompletenessScore += 30;
+  const eventCompletenessFactor = clamp(eventCompletenessScore);
+
+  // Chain integrity (0-100): previousEventId validity
+  let chainIntegrityScore = 100;
+  if (flow.brokenLinksCount > 0) {
+    chainIntegrityScore -= flow.brokenLinksCount * 35;
+  }
+  if (!flow.chainComplete && batchEvents.length > 1) {
+    chainIntegrityScore -= 15;
+  }
+  const chainIntegrityFactor = clamp(chainIntegrityScore);
+
+  // Inventory accounting completeness (0-100)
+  const inventoryAccountingFactor = clamp((accountedQuantity / totalBatchQty) * 100);
+
+  // Temporal consistency (0-100): verify chronological order along parent-child links
+  let temporalInconsistencies = 0;
+  const eventMap = new Map<string, CustodyEvent>(batchEvents.map((e) => [e.eventId, e]));
+  for (const e of batchEvents) {
+    if (e.previousEventId) {
+      const parent = eventMap.get(e.previousEventId);
+      if (parent && parent.timestamp > e.timestamp) {
+        temporalInconsistencies++;
+        evidenceGaps.push(`Temporal anomaly: Event ${e.eventId} timestamp is earlier than previous event ${parent.eventId}.`);
+      }
     }
-    if (batch.status === "RECALLED" || batch.status === "HELD") {
-      exposure -= 12;
-      reasons.push(`Batch is already ${batch.status.toLowerCase()}, reducing exposure by 12.`);
-    }
-  } else {
-    reasons.push("No batch record was found, so shelf-life exposure could not be assessed.");
   }
+  const temporalConsistencyFactor = clamp(100 - temporalInconsistencies * 35);
 
-  // --- Evidence confidence ------------------------------------------------
-  let confidence = TYPE_EVIDENCE[incident.type];
-  reasons.push(
-    `Baseline evidence for a ${incident.type.replace(/_/g, " ").toLowerCase()} report is ${TYPE_EVIDENCE[incident.type]} points.`,
-  );
-
-  const chainPoints = Math.min(25, batchEvents.length * 4);
-  confidence += chainPoints;
-  reasons.push(`${batchEvents.length} recorded custody event(s) add ${chainPoints} points.`);
-
-  const linked = batchEvents.filter((e, i) => i === 0 || e.previousEventId !== null).length;
-  const chainComplete = batchEvents.length > 0 && linked === batchEvents.length;
-  if (chainComplete) {
-    confidence += 12;
-    reasons.push("Custody chain is unbroken end to end (+12).");
-  } else {
-    reasons.push("Custody chain has gaps between events, so no continuity points were awarded.");
+  // Organization/Location completeness (0-100)
+  let unknownOrgsCount = 0;
+  const orgMap = new Map<string, Organization>(organizations.map((o) => [o.organizationId, o]));
+  for (const e of batchEvents) {
+    if (!orgMap.has(e.fromOrganization)) unknownOrgsCount++;
+    if (!orgMap.has(e.toOrganization)) unknownOrgsCount++;
   }
-
-  const descriptionPoints = incident.description.trim().length >= 120 ? 10 : 3;
-  confidence += descriptionPoints;
-  reasons.push(`Incident report detail adds ${descriptionPoints} points.`);
-
-  if (incident.status === "INVESTIGATING") {
-    confidence += 5;
-    reasons.push("Investigation is already under way (+5).");
+  if (unknownOrgsCount > 0) {
+    evidenceGaps.push(`${unknownOrgsCount} custody transfer reference organization(s) not in registry.`);
   }
+  const organizationCompletenessFactor = clamp(100 - unknownOrgsCount * 25);
 
-  const verified = batchEvents.filter((e) => e.verificationStatus === "VERIFIED").length;
-  if (verified === 0) {
-    reasons.push(
-      "No custody event is cryptographically verified — blockchain anchoring is pending integration, so no verification points were awarded.",
-    );
-  } else {
-    confidence += Math.min(10, verified * 2);
-    reasons.push(`${verified} verified custody event(s) add confidence.`);
+  // Duplicate / Anomaly quality (0-100)
+  let anomalyScore = 100;
+  if (flow.duplicateEventsCount > 0) {
+    anomalyScore -= flow.duplicateEventsCount * 30;
   }
+  if (unaccountedQuantity > 0 && batchEvents.length > 0) {
+    anomalyScore -= 20;
+  }
+  const anomalyQualityFactor = clamp(anomalyScore);
 
-  const exposureRisk = clamp(exposure);
-  const evidenceConfidence = clamp(confidence);
+  const rawEvidenceConfidence =
+    eventCompletenessFactor * 0.25 +
+    chainIntegrityFactor * 0.25 +
+    inventoryAccountingFactor * 0.20 +
+    temporalConsistencyFactor * 0.10 +
+    organizationCompletenessFactor * 0.10 +
+    anomalyQualityFactor * 0.10;
+
+  const evidenceConfidence = clamp(rawEvidenceConfidence);
+
+  // =========================================================================
+  // 3. HUMAN-READABLE REASONS & FACTOR EXPLANATIONS
+  // =========================================================================
+  const reasons: string[] = [
+    `Incident type '${incident.type}' severity contributes factor score of ${incidentSeverityFactor}/100 (weighted 15%).`,
+    `${Math.round(affectedRatio * 100)}% of batch quantity (${affectedQuantity.toLocaleString()} / ${totalBatchQty.toLocaleString()} units) is downstream affected (quantity factor: ${affectedQuantityRatioFactor}/100, weighted 30%).`,
+    `${affectedLocations.length} active downstream location(s) reached (reach factor: ${downstreamReachFactor}/100, weighted 25%).`,
+    `${retailReachCount} retail endpoint(s) reached by consumers (consumer factor: ${consumerFacingReachFactor}/100, weighted 20%).`,
+    `${uniqueGeographicLocations.size} unique geographic location(s) affected (geographic factor: ${geographicReachFactor}/100, weighted 10%).`,
+    `Event completeness score is ${eventCompletenessFactor}/100 (weighted 25%).`,
+    `Custody chain integrity score is ${chainIntegrityFactor}/100 with ${flow.brokenLinksCount} broken link(s) (weighted 25%).`,
+    `Inventory accounting completeness score is ${inventoryAccountingFactor}/100 (${accountedQuantity.toLocaleString()} units accounted) (weighted 20%).`,
+    `Temporal consistency score is ${temporalConsistencyFactor}/100 with ${temporalInconsistencies} anomaly(ies) (weighted 10%).`,
+    `Organization completeness score is ${organizationCompletenessFactor}/100 (weighted 10%).`,
+    `Anomaly & duplicate data quality score is ${anomalyQualityFactor}/100 with ${flow.duplicateEventsCount} duplicate(s) (weighted 10%).`,
+  ];
+
   const priority = resolvePriority(exposureRisk, evidenceConfidence);
+
+  const riskFactors = {
+    affectedQuantityRatio: affectedQuantityRatioFactor,
+    downstreamReach: downstreamReachFactor,
+    consumerFacingReach: consumerFacingReachFactor,
+    geographicReach: geographicReachFactor,
+    incidentSeverity: incidentSeverityFactor,
+  };
+
+  const evidenceFactors = {
+    eventCompleteness: eventCompletenessFactor,
+    chainIntegrity: chainIntegrityFactor,
+    inventoryAccounting: inventoryAccountingFactor,
+    temporalConsistency: temporalConsistencyFactor,
+    organizationCompleteness: organizationCompletenessFactor,
+    anomalyQuality: anomalyQualityFactor,
+  };
 
   return {
     analysisId: `ANL-${incident.incidentId}`,
@@ -194,10 +464,15 @@ export function analyseIncident({
     batchId: incident.batchId,
     affectedLocations,
     affectedQuantity,
+    accountedQuantity,
+    unaccountedQuantity,
     exposureRisk,
     evidenceConfidence,
+    riskFactors,
+    evidenceFactors,
     priority,
     reasons,
+    evidenceGaps,
     recommendedAction: RECOMMENDED_ACTION[priority],
     generatedAt: new Date().toISOString(),
   };

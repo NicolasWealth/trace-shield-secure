@@ -40,6 +40,10 @@ export function useTraceData() {
     incidents: incidents.data ?? [],
     isLoading:
       organizations.isLoading || batches.isLoading || events.isLoading || incidents.isLoading,
+    isError:
+      organizations.isError || batches.isError || events.isError || incidents.isError,
+    error:
+      organizations.error ?? batches.error ?? events.error ?? incidents.error ?? null,
   };
 }
 
